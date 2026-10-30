@@ -1,0 +1,30 @@
+# torch/torchvision cài riêng bản CUDA 12.8 (bắt buộc cho RTX 50xx) trong scripts/install_server.sh
+
+# Model OpenVLA (code model tải từ HF qua trust_remote_code, yêu cầu đúng các version này)
+transformers==4.40.1
+tokenizers==0.19.1
+timm==0.9.10
+accelerate>=0.26
+sentencepiece
+huggingface_hub<1.0
+numpy==1.26.4
+pillow
+
+# Xử lý ảnh giống pipeline train + đọc dataset RLDS (chỉ chạy trên CPU)
+tensorflow-cpu==2.15.0
+tensorflow-datasets==4.9.3
+
+# Simulator LIBERO (LIBERO cài --no-deps từ git, xem install script)
+robosuite==1.4.1
+bddl==1.0.1
+mujoco
+easydict
+cloudpickle
+gym==0.25.2
+pyyaml
+future
+
+# Phân tích
+imageio[ffmpeg]
+matplotlib
+tqdm

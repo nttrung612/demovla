@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.vscode/
+.idea/
+
+# tải về / sinh ra trên server
+third_party/
+data/
+outputs/
+*.mp4
+*.npz
