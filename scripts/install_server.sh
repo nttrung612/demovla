@@ -25,6 +25,8 @@ fi
 set +u  # script activate của conda dùng biến chưa khai báo
 conda activate "$ENV_NAME"
 set -u
+# Không lấy package từ ~/.local của Python cùng phiên bản khi cài hoặc kiểm tra.
+export PYTHONNOUSERSITE=1
 python -m pip install --upgrade pip
 
 echo "==> torch ${TORCH_VERSION} (cu128)"
@@ -39,6 +41,8 @@ if [ ! -d "$THIRD_PARTY/LIBERO" ]; then
   git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git "$THIRD_PARTY/LIBERO"
 fi
 # --no-deps: requirements gốc của LIBERO pin torch cũ, sẽ phá torch cu128
+# Thư mục namespace libero/ thiếu __init__.py, khiến setuptools không tìm thấy package.
+touch "$THIRD_PARTY/LIBERO/libero/__init__.py"
 pip install -e "$THIRD_PARTY/LIBERO" --no-deps
 
 # LIBERO hỏi đường dẫn bằng input() ở lần import đầu tiên -> tạo sẵn config để chạy non-interactive

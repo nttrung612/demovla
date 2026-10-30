@@ -13,6 +13,8 @@ pillow
 # Xử lý ảnh giống pipeline train + đọc dataset RLDS (chỉ chạy trên CPU)
 tensorflow-cpu==2.15.0
 tensorflow-datasets==4.9.3
+# Các bản mới sinh protobuf cần runtime mới hơn protobuf 4 của TensorFlow 2.15.
+tensorflow-metadata==1.15.0
 
 # Simulator LIBERO (LIBERO cài --no-deps từ git, xem install script)
 robosuite==1.4.1
