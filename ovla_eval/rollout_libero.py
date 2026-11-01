@@ -91,6 +91,13 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--no-video", action="store_true")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
+    ap.add_argument(
+        "--fresh-env-at",
+        type=int,
+        nargs="*",
+        default=[],
+        help="tạo lại env trước các episode này, để khớp baseline từng resume bằng process mới (xem replay_safety)",
+    )
     ap.add_argument("--response", default="none", choices=["none", "hold", "clip", "mask"], help="phản ứng sau báo động")
     ap.add_argument("--thresholds", help="monitor.json của ovla_eval.monitor, bắt buộc khi có --response")
     ap.add_argument("--lift-dz", type=float, default=LIFT_DZ, help="dz tối thiểu khi nhấc tay (clip, mask)")
@@ -145,6 +152,9 @@ def main():
                 with np.load(npz_path) as d:
                     episodes.append({"episode": ep, "success": bool(d["success"]), "steps": int(len(d["pred_env"]))})
                 continue
+            if env is not None and ep in args.fresh_env_at:
+                env.close()
+                env = None
             if env is None:
                 env = lu.make_env(task)
             start = time.time()

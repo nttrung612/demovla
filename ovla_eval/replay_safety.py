@@ -68,7 +68,8 @@ def main():
         type=int,
         nargs="*",
         default=[],
-        help="tạo lại env trước các episode này, khớp với lúc rollout gốc resume bằng process mới",
+        help="tạo lại env trước các episode này, khớp với lúc rollout gốc resume bằng process mới "
+        "(env mới đặt lại seed numpy, mà vị trí fixture mỗi lần reset lấy từ seed này)",
     )
     ap.add_argument("--hold-after", help="monitor.json: giữ tư thế sau báo động; cần --out để không ghi đè kết quả baseline")
     ap.add_argument("--out", help="mặc định: <rollouts>/safety_replay.json")

@@ -122,8 +122,9 @@ python -m ovla_eval.compare_responses --baseline outputs/rollouts/libero_spatial
 
 - Báo động ở bước t thì phản ứng có hiệu lực từ bước t + 1.
 - `hold` giữ tư thế và gripper tới hết episode. `mask` và `clip` nhấc tay với `dz >= 0.3` trong 10 bước, chờ 10 bước, tối đa 2 lần, rồi dừng hẳn.
-- Nếu rollout gốc từng resume bằng process mới, truyền cùng `--fresh-env-at` cho `replay_safety`.
-- Env có lịch sử giữa các episode, nên mỗi phản ứng phải chạy đủ các episode theo đúng thứ tự. `--prefix-check` báo bao nhiêu episode có đoạn trước báo động khớp baseline. Nếu không khớp hết thì phải ghi rõ điều này trong báo cáo.
+- Mỗi lần `env.reset()`, LIBERO bốc lại vị trí fixture từ seed numpy và ghi vào `sim.model`, còn `set_init_state` chỉ khôi phục `sim.data`. `make_env` lại đặt seed về 0. Vì vậy vị trí fixture của một episode phụ thuộc vào số lần reset kể từ lúc tạo env.
+- Nếu rollout gốc từng resume bằng process mới, truyền cùng `--fresh-env-at` cho cả `replay_safety` và `rollout_libero`, ví dụ `--fresh-env-at 5` nếu đã chạy `--trials 5` trước. Baseline hiện tại cần đúng giá trị này. Kiểm tra bằng dòng `phát lại khớp rollout gốc`, phải là 500/500.
+- Mỗi phản ứng phải chạy đủ các episode theo đúng thứ tự, trong một process. Bị ngắt giữa chừng rồi resume cũng làm lệch seed. `--prefix-check` báo bao nhiêu episode có đoạn trước báo động khớp baseline. Nếu không khớp hết thì phải ghi rõ trong báo cáo.
 
 ## Định dạng đầu ra
 
