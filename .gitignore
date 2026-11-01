@@ -10,3 +10,4 @@ data/
 outputs/
 *.mp4
 *.npz
+input.png
