@@ -4,9 +4,14 @@ Không cần GPU hay model: chỉ cần simulator. Dùng để trả lời "roll
 trước khi quyết định metric an toàn chính. Simulator phải xác định (deterministic): `replay_matches` cho biết
 kết quả phát lại có khớp với rollout gốc (cùng success, cùng số bước) hay không.
 
+Với --hold-after, action chạy tới báo động rồi giữ nguyên tư thế tới hết episode: đây là cách đánh giá phản ứng dừng mà
+không cần GPU. Chỉ đoạn trước báo động được so với rollout gốc.
+
 Ví dụ:
     python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/rollouts/libero_spatial
     python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/rollouts/libero_spatial --tasks 1 8
+    python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/rollouts/libero_spatial \\
+        --hold-after outputs/rollouts/libero_spatial/monitor.json --out outputs/responses/hold.json
 """
 
 import argparse
@@ -17,17 +22,24 @@ from . import libero_utils as lu  # import trước để set biến môi trư�
 import numpy as np
 import tqdm
 
-from .constants import SUITES
+from .constants import SUITE_MAX_STEPS, SUITES
+from .monitor import hold_action
 from .safety_log import DISPLACEMENT_THRESHOLD, SafetyLogger
 
 EEF_MATCH_TOLERANCE = 1e-6  # m: lệch quỹ đạo end-effector lớn hơn mức này thì coi là phát lại không khớp
 
 
-def replay_episode(env, init_state, actions: np.ndarray, eef_state: np.ndarray) -> dict:
+def replay_episode(env, init_state, actions: np.ndarray, eef_state: np.ndarray, alarm_step: int | None = None, max_steps: int = 0) -> dict:
     """Giống mở đầu của rollout_libero.run_episode: reset, nạp init state, chờ NUM_STEPS_WAIT bước rồi mới chạy action.
 
     eef_state[t] là trạng thái trước action t, nên sau action t so với eef_state[t + 1].
+    alarm_step: nếu có, chạy action tới bước đó rồi giữ tư thế tới max_steps.
     """
+    n_saved = len(eef_state)
+    if alarm_step is not None:
+        n_saved = alarm_step + 1
+        hold = np.tile(hold_action(actions[alarm_step, -1]), (max(max_steps - n_saved, 0), 1))
+        actions = np.concatenate([actions[:n_saved], hold])
     env.reset()
     env.set_init_state(init_state)
     for _ in range(lu.NUM_STEPS_WAIT):
@@ -38,7 +50,7 @@ def replay_episode(env, init_state, actions: np.ndarray, eef_state: np.ndarray) 
         obs, _, done, _ = env.step(action.tolist())
         logger.record()
         n_steps += 1
-        if t + 1 < len(eef_state):
+        if t + 1 < n_saved:
             error = np.linalg.norm(obs["robot0_eef_pos"] - eef_state[t + 1, :3])
             max_eef_error = max(max_eef_error, float(error))
         if done:
@@ -58,8 +70,12 @@ def main():
         default=[],
         help="tạo lại env trước các episode này, khớp với lúc rollout gốc resume bằng process mới",
     )
+    ap.add_argument("--hold-after", help="monitor.json: giữ tư thế sau báo động; cần --out để không ghi đè kết quả baseline")
     ap.add_argument("--out", help="mặc định: <rollouts>/safety_replay.json")
     args = ap.parse_args()
+    if args.hold_after and not args.out:
+        ap.error("--hold-after cần --out")
+    alarms = json.loads(Path(args.hold_after).read_text())["alarms"] if args.hold_after else {}
 
     root = Path(args.rollouts)
     suite = lu.get_task_suite(args.suite)
@@ -79,16 +95,17 @@ def main():
             if episode in args.fresh_env_at:
                 env.close()
                 env = lu.make_env(task)
-            res = replay_episode(env, init_states[episode], actions, eef_state)
+            alarm_step = alarms.get(str(task_id), {}).get(str(episode))
+            res = replay_episode(env, init_states[episode], actions, eef_state, alarm_step, SUITE_MAX_STEPS[args.suite])
             res.update(
                 task_id=task_id,
                 episode=episode,
                 instruction=task.language,
                 saved_success=saved_success,
                 saved_steps=int(len(actions)),
+                alarm_step=alarm_step,
                 replay_matches=bool(
-                    res["replay_success"] == saved_success
-                    and res["replay_steps"] == len(actions)
+                    (alarm_step is not None or (res["replay_success"] == saved_success and res["replay_steps"] == len(actions)))
                     and res["max_eef_error"] < EEF_MATCH_TOLERANCE
                 ),
             )

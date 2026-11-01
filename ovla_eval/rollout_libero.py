@@ -6,12 +6,15 @@ toàn bộ trajectory: action từng bước, độ tự tin của model, trạn
 Ví dụ:
     python -m ovla_eval.rollout_libero --suite libero_spatial --trials 5
     python -m ovla_eval.rollout_libero --suite libero_goal --tasks 0 3 --trials 50
+    python -m ovla_eval.rollout_libero --suite libero_spatial --response mask --no-video \\
+        --thresholds outputs/rollouts/libero_spatial/monitor.json --out-dir outputs/responses/mask
 """
 
 import argparse
 import json
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 from . import libero_utils as lu  # import trước để set biến môi trường MUJOCO_GL, ...
@@ -20,11 +23,15 @@ import numpy as np
 import tqdm
 
 from .constants import PAPER_SUCCESS_RATE, SUITE_CHECKPOINTS, SUITE_MAX_STEPS, SUITES
+from .monitor import LIFT_DZ, LIFT_STEPS, ResponseGuard
 from .policy import OpenVLAPolicy, set_seed
 from .preprocess import resize_image
 
 
-def run_episode(env, policy: OpenVLAPolicy, instruction: str, init_state, max_steps: int) -> dict:
+DEFAULT_OUT_DIR = "outputs/rollouts"
+
+
+def run_episode(env, policy: OpenVLAPolicy, instruction: str, init_state, max_steps: int, guard: ResponseGuard | None = None) -> dict:
     env.reset()
     obs = env.set_init_state(init_state)
     frames, records, states = [], [], []
@@ -39,7 +46,9 @@ def run_episode(env, policy: OpenVLAPolicy, instruction: str, init_state, max_st
             img = resize_image(lu.agentview_image(obs))
             frames.append(img)
             states.append(lu.eef_state(obs))
-            pred = policy.predict(img, instruction)
+            pred = policy.predict(img, instruction, dz_min=guard.dz_min if guard else None)
+            if guard:  # pred_env lưu action thực sự gửi vào env, vì replay_safety phát lại đúng mảng này
+                pred = replace(pred, env=guard.step(pred, states[-1]))
             records.append(pred)
             obs, _, done, _ = env.step(pred.env.tolist())
             if done:
@@ -64,6 +73,7 @@ def run_episode(env, policy: OpenVLAPolicy, instruction: str, init_state, max_st
             "bin_entropy": stack("bin_entropy"),
             "expected_raw": stack("expected_raw"),
             "eef_state": np.stack(states) if states else np.zeros((0, 8)),
+            **({"alarm_steps": np.array(guard.alarm_steps, dtype=np.int64)} if guard else {}),
         },
     }
 
@@ -80,10 +90,22 @@ def main():
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--no-video", action="store_true")
-    ap.add_argument("--out-dir", default="outputs/rollouts")
+    ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
+    ap.add_argument("--response", default="none", choices=["none", "hold", "clip", "mask"], help="phản ứng sau báo động")
+    ap.add_argument("--thresholds", help="monitor.json của ovla_eval.monitor, bắt buộc khi có --response")
+    ap.add_argument("--lift-dz", type=float, default=LIFT_DZ, help="dz tối thiểu khi nhấc tay (clip, mask)")
+    ap.add_argument("--lift-steps", type=int, default=LIFT_STEPS, help="số bước nhấc tay sau mỗi báo động (clip, mask)")
     args = ap.parse_args()
+    if args.response != "none":
+        if not args.thresholds:
+            ap.error("--response cần --thresholds")
+        if args.out_dir == DEFAULT_OUT_DIR:
+            ap.error("--response cần --out-dir riêng để không trộn với kết quả baseline")
 
     set_seed(args.seed)
+    monitor_config = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
+    if monitor_config and monitor_config["suite"] != args.suite:
+        print(f"Ngưỡng được hiệu chỉnh trên {monitor_config['suite']}: dùng bộ ngưỡng chung cho {args.suite}")
     checkpoint = args.checkpoint or SUITE_CHECKPOINTS[args.suite]
     policy = OpenVLAPolicy(
         checkpoint,
@@ -99,6 +121,14 @@ def main():
     max_steps = SUITE_MAX_STEPS[args.suite]
     out_root = Path(args.out_dir) / args.suite
     out_root.mkdir(parents=True, exist_ok=True)
+
+    def make_guard(task_id: int) -> ResponseGuard | None:
+        if args.response == "none":
+            return None
+        same_suite = monitor_config["suite"] == args.suite
+        row = monitor_config["thresholds"][str(task_id) if same_suite else "all"]
+        thresholds = {s: (float("inf") if v is None else v) for s, v in row.items()}
+        return ResponseGuard(thresholds, args.response, args.lift_dz, args.lift_steps)
 
     results = {}
     for task_id in tqdm.tqdm(task_ids, desc="tasks"):
@@ -118,7 +148,7 @@ def main():
             if env is None:
                 env = lu.make_env(task)
             start = time.time()
-            res = run_episode(env, policy, task.language, init_states[ep], max_steps)
+            res = run_episode(env, policy, task.language, init_states[ep], max_steps, make_guard(task_id))
             n_steps = len(res["arrays"]["pred_env"])
             np.savez_compressed(
                 npz_path,
@@ -162,6 +192,7 @@ def main():
         "unnorm_key": policy.unnorm_key,
         "center_crop": policy.use_center_crop,
         "seed": args.seed,
+        "response": args.response,
         "success_rate": total_ok / max(total, 1),
         "paper_success_rate": PAPER_SUCCESS_RATE.get(args.suite, float("nan")) / 100,
         "tasks": results,

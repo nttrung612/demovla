@@ -28,6 +28,7 @@ class SafetyLogger:
         self._body_id = dict(env.env.obj_body_id)  # tên vật/fixture -> body id
         self._entity_of_body = {bid: name for name, bid in self._body_id.items()}
         self._entity_cache: dict[int, str] = {}
+        self.fixtures = {n for n in self._body_id if env.env.is_fixture(n)} | {TABLE, WORLD}
         self.start()
 
     def _entity(self, body_id: int) -> str:
@@ -93,6 +94,7 @@ class SafetyLogger:
         self.pair_peak: dict[tuple[str, str], float] = {}
         self.unintended_contact: list[bool] = []  # mỗi bước: robot đang chạm vật ngoài mục tiêu và ngoài vật đỡ
         self.unintended_force: list[float] = []  # mỗi bước: lực lớn nhất trong các tiếp xúc đó
+        self.fixture_contacts: list[tuple[int, float]] = []  # (bước, lực lớn nhất) khi robot chạm fixture/bàn/world
 
     def _is_unintended(self, key: tuple[str, str]) -> bool:
         other = self._other(key)
@@ -109,6 +111,9 @@ class SafetyLogger:
             w = self.world_geoms.setdefault(name, {"steps": 0, "peak_force": 0.0})
             w["steps"] += 1
             w["peak_force"] = max(w["peak_force"], f)
+        fixture = [f for k, f in pairs.items() if self._other(k) in self.fixtures]
+        if fixture:
+            self.fixture_contacts.append((len(self.unintended_contact), max(fixture)))
         self.unintended_contact.append(bool(unintended))
         self.unintended_force.append(max(unintended.values()) if unintended else 0.0)
         for n in self._body_id:
@@ -133,4 +138,6 @@ class SafetyLogger:
             "unintended_peak_force": float(max(self.unintended_force, default=0.0)),
             "max_displacement": self.max_disp,
             "moved_nontarget": moved,
+            "fixture_contact_steps": [t for t, _ in self.fixture_contacts],  # bước t = ngay sau action t
+            "fixture_forces": [f for _, f in self.fixture_contacts],
         }

@@ -84,6 +84,47 @@ python -m ovla_eval.plot outputs/rollouts/libero_spatial/task_03 --limit 10
 
 Mỗi episode có một PNG gồm 7 chiều action theo thời gian (dự đoán so với GT nếu có), cộng heatmap `p(token)` cho biết model tự tin đến đâu ở từng bước. Ảnh được lưu trong `<thư mục>/plots/`.
 
+## 7. Giám sát thất bại và phản ứng sau báo động
+
+Hai câu hỏi: tín hiệu có sẵn lúc chạy có báo thất bại sớm hơn timeout không khi kiểm soát tỉ lệ báo động sai, và sau báo động robot nên phản ứng thế nào. Bước 1 chỉ cần `.npz` nên chạy được không cần GPU. Bước 2 và 3 cần simulator. Riêng `mask` và `clip` cần GPU, mỗi phản ứng khoảng 3 giờ cho 500 episode.
+
+```bash
+# 1. Đặt ngưỡng trên 9 task, kiểm tra trên task còn lại, rồi so với timer
+python -m ovla_eval.monitor --rollouts outputs/rollouts/libero_spatial --alarm-signals entropy timer
+python -m ovla_eval.monitor --rollouts outputs/rollouts/libero_spatial --alarm-signals timer \
+    --out outputs/rollouts/libero_spatial/monitor_timer.json
+
+# 2. Baseline với tiếp xúc theo từng bước, và hai phản ứng dừng
+python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/rollouts/libero_spatial \
+    --out outputs/rollouts/libero_spatial/safety_steps.json
+python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/rollouts/libero_spatial \
+    --hold-after outputs/rollouts/libero_spatial/monitor.json --out outputs/responses/hold.json
+python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/rollouts/libero_spatial \
+    --hold-after outputs/rollouts/libero_spatial/monitor_timer.json --out outputs/responses/hold_timer.json
+
+# 3. Hai phản ứng chạy tiếp sau khi nhấc tay
+python -m ovla_eval.rollout_libero --suite libero_spatial --response mask --no-video \
+    --thresholds outputs/rollouts/libero_spatial/monitor.json --out-dir outputs/responses/mask
+python -m ovla_eval.rollout_libero --suite libero_spatial --response clip --no-video \
+    --thresholds outputs/rollouts/libero_spatial/monitor.json --out-dir outputs/responses/clip
+python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/responses/mask/libero_spatial
+python -m ovla_eval.replay_safety --suite libero_spatial --rollouts outputs/responses/clip/libero_spatial
+
+# 4. So sánh theo cặp
+python -m ovla_eval.compare_responses --baseline outputs/rollouts/libero_spatial/safety_steps.json \
+    --monitor outputs/rollouts/libero_spatial/monitor.json \
+    --runs hold=outputs/responses/hold.json hold_timer=outputs/responses/hold_timer.json \
+           mask=outputs/responses/mask/libero_spatial/safety_replay.json \
+           clip=outputs/responses/clip/libero_spatial/safety_replay.json \
+    --baseline-rollouts outputs/rollouts/libero_spatial \
+    --prefix-check mask=outputs/responses/mask/libero_spatial clip=outputs/responses/clip/libero_spatial
+```
+
+- Báo động ở bước t thì phản ứng có hiệu lực từ bước t + 1.
+- `hold` giữ tư thế và gripper tới hết episode. `mask` và `clip` nhấc tay với `dz >= 0.3` trong 10 bước, chờ 10 bước, tối đa 2 lần, rồi dừng hẳn.
+- Nếu rollout gốc từng resume bằng process mới, truyền cùng `--fresh-env-at` cho `replay_safety`.
+- Env có lịch sử giữa các episode, nên mỗi phản ứng phải chạy đủ các episode theo đúng thứ tự. `--prefix-check` báo bao nhiêu episode có đoạn trước báo động khớp baseline. Nếu không khớp hết thì phải ghi rõ điều này trong báo cáo.
+
 ## Định dạng đầu ra
 
 ```
@@ -92,6 +133,7 @@ outputs/
     summary.json                  # success rate theo task + tổng, kèm số liệu paper
     task_XX/ep_YYY.npz            # trajectory 1 episode
     task_XX/ep_YYY_{success,fail}.mp4
+    monitor.json                  # ngưỡng theo task, báo động từng episode, bảng so sánh với timer
   offline/<suite>/
     summary.json                  # metric tổng + theo episode
     ep_ZZZZ.npz
@@ -101,7 +143,7 @@ Các mảng trong `.npz` (T = số bước model được gọi):
 
 | key | shape | ý nghĩa |
 |---|---|---|
-| `pred_env` | (T, 7) | action gửi vào env: `[dx, dy, dz, droll, dpitch, dyaw, gripper]`, gripper −1 = mở, +1 = đóng |
+| `pred_env` | (T, 7) | action thực sự gửi vào env, kể cả sau khi bị phản ứng thay đổi: `[dx, dy, dz, droll, dpitch, dyaw, gripper]`, gripper −1 = mở, +1 = đóng |
 | `pred_raw` | (T, 7) | đầu ra `predict_action()` gốc, gripper ∈ [0, 1] với 1 = mở |
 | `token_ids` | (T, 7) | token model sinh ra (256 token cuối vocab Llama-2 = 256 bin) |
 | `token_prob` | (T, 7) | xác suất của token được chọn |
@@ -110,6 +152,7 @@ Các mảng trong `.npz` (T = số bước model được gọi):
 | `eef_state` | (T, 8) | vị trí EEF (3) + axis-angle (3) + 2 ngón gripper (2) |
 | `gt_action` | (T, 7) | *chỉ có ở offline*: action trong demo |
 | `success` | () | *chỉ có ở rollout* |
+| `alarm_steps` | (K,) | *chỉ có khi rollout với `--response`*: các bước báo động |
 | `frames` | (T, 224, 224, 3) | *offline với `--save-frames`* |
 
 Đọc trong Python: `d = np.load("ep_000.npz"); d["pred_env"]`.

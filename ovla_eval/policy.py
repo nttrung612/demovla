@@ -14,13 +14,15 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoModelForVision2Seq, AutoProcessor, LogitsProcessor, LogitsProcessorList
 
+from .constants import ACTION_DIM_NAMES
 from .preprocess import center_crop
 
 PROMPT_TEMPLATE = "In: What action should the robot take to {}?\nOut:"
 EMPTY_TOKEN_ID = 29871  # token '' mà OpenVLA chèn sau "Out:" lúc train
 N_ACTION_TOKENS = 256
+DZ_INDEX = ACTION_DIM_NAMES.index("dz")
 
 
 @dataclass
@@ -32,6 +34,26 @@ class ActionPrediction:
     token_prob: np.ndarray  # (D,) xác suất softmax của token được chọn
     bin_entropy: np.ndarray  # (D,) entropy (nats) của phân phối trên 256 token action, max = ln 256 ≈ 5.55
     expected_raw: np.ndarray  # (D,) kỳ vọng action theo phân phối bin (soft decode), để so với argmax
+
+
+class TokenMaskProcessor(LogitsProcessor):
+    """Chỉ cho phép các token trong `allowed` ở chiều action `dim`, các chiều khác không đổi.
+
+    Giữ lại logits gốc của mọi chiều: out.scores là logits đã qua processor, nên nếu dùng nó thì entropy và xác suất
+    sẽ mô tả phân phối đã che, không còn là phân phối thật của model.
+    """
+
+    def __init__(self, allowed: torch.Tensor, dim: int, prompt_len: int):
+        self.allowed = allowed  # (vocab,) bool
+        self.dim = dim
+        self.prompt_len = prompt_len
+        self.raw_scores: list[torch.Tensor] = []
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        self.raw_scores.append(scores.clone())
+        if input_ids.shape[1] - self.prompt_len == self.dim:
+            return scores.masked_fill(~self.allowed, -torch.inf)
+        return scores
 
 
 def gripper_to_env(action: np.ndarray) -> np.ndarray:
@@ -123,8 +145,20 @@ class OpenVLAPolicy:
         prompt = PROMPT_TEMPLATE.format(instruction.lower())
         return self.processor(prompt, Image.fromarray(image).convert("RGB")).to(self.device, dtype=torch.bfloat16)
 
+    def _dz_allowed_tokens(self, dz_min: float) -> torch.Tensor:
+        """(vocab,) bool: các token action của dz có giá trị >= dz_min. Không token nào đạt thì lấy token dz lớn nhất."""
+        centers = self._action_token_centers.cpu().numpy().astype(np.float64)
+        q01, q99 = self.q01[DZ_INDEX], self.q99[DZ_INDEX]
+        values = torch.as_tensor(0.5 * (centers + 1.0) * (q99 - q01) + q01, device=self.device)
+        allowed = torch.zeros(self.vocab_size, dtype=torch.bool, device=self.device)
+        ok = values >= dz_min
+        allowed[self._action_token_ids[ok if ok.any() else values == values.max()]] = True
+        return allowed
+
     @torch.inference_mode()
-    def predict(self, image: np.ndarray, instruction: str) -> ActionPrediction:
+    def predict(self, image: np.ndarray, instruction: str, dz_min: float | None = None) -> ActionPrediction:
+        """dz_min: nếu có, chỉ decode token dz có giá trị >= dz_min. Các chiều sau dz được sinh tiếp theo token đã che.
+        token_prob, bin_entropy và expected_raw luôn lấy từ phân phối gốc của model."""
         inputs = self._prepare_inputs(image, instruction)
         input_ids, attention_mask = inputs["input_ids"], inputs["attention_mask"]
         if not torch.all(input_ids[:, -1] == EMPTY_TOKEN_ID):
@@ -132,6 +166,11 @@ class OpenVLAPolicy:
             input_ids = torch.cat([input_ids, extra], dim=1)
             attention_mask = torch.cat([attention_mask, torch.ones_like(extra)], dim=1)
 
+        mask = None
+        extra = {}
+        if dz_min is not None:
+            mask = TokenMaskProcessor(self._dz_allowed_tokens(dz_min), DZ_INDEX, input_ids.shape[1])
+            extra["logits_processor"] = LogitsProcessorList([mask])
         out = self.vla.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -140,9 +179,10 @@ class OpenVLAPolicy:
             do_sample=False,
             output_scores=True,
             return_dict_in_generate=True,
+            **extra,
         )
         token_ids = out.sequences[0, -self.action_dim :].cpu().numpy()
-        logits = torch.stack(out.scores, dim=0)[:, 0].float()  # (D, vocab)
+        logits = torch.stack(mask.raw_scores if mask else out.scores, dim=0)[:, 0].float()  # (D, vocab)
 
         rows = torch.arange(self.action_dim, device=self.device)
         token_prob = torch.softmax(logits, dim=-1)[rows, torch.as_tensor(token_ids, device=self.device)]
