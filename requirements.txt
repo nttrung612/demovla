@@ -19,7 +19,8 @@ tensorflow-metadata==1.15.0
 # Simulator LIBERO (LIBERO cài --no-deps từ git, xem install script)
 robosuite==1.4.1
 bddl==1.0.1
-mujoco
+# robosuite 1.4.1 không tương thích với MuJoCo mới (ví dụ 3.17).
+mujoco==3.2.3
 easydict
 cloudpickle
 gym==0.25.2
