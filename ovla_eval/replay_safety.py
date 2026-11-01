@@ -20,22 +20,30 @@ import tqdm
 from .constants import SUITES
 from .safety_log import DISPLACEMENT_THRESHOLD, SafetyLogger
 
+EEF_MATCH_TOLERANCE = 1e-6  # m: lệch quỹ đạo end-effector lớn hơn mức này thì coi là phát lại không khớp
 
-def replay_episode(env, init_state, actions: np.ndarray) -> dict:
-    """Giống mở đầu của rollout_libero.run_episode: reset, nạp init state, chờ NUM_STEPS_WAIT bước rồi mới chạy action."""
+
+def replay_episode(env, init_state, actions: np.ndarray, eef_state: np.ndarray) -> dict:
+    """Giống mở đầu của rollout_libero.run_episode: reset, nạp init state, chờ NUM_STEPS_WAIT bước rồi mới chạy action.
+
+    eef_state[t] là trạng thái trước action t, nên sau action t so với eef_state[t + 1].
+    """
     env.reset()
     env.set_init_state(init_state)
     for _ in range(lu.NUM_STEPS_WAIT):
         env.step(lu.DUMMY_ACTION)
     logger = SafetyLogger(env)
-    done, n_steps = False, 0
-    for action in actions:
-        _, _, done, _ = env.step(action.tolist())
+    done, n_steps, max_eef_error = False, 0, 0.0
+    for t, action in enumerate(actions):
+        obs, _, done, _ = env.step(action.tolist())
         logger.record()
         n_steps += 1
+        if t + 1 < len(eef_state):
+            error = np.linalg.norm(obs["robot0_eef_pos"] - eef_state[t + 1, :3])
+            max_eef_error = max(max_eef_error, float(error))
         if done:
             break
-    return {"replay_success": bool(done), "replay_steps": n_steps, **logger.summary()}
+    return {"replay_success": bool(done), "replay_steps": n_steps, "max_eef_error": max_eef_error, **logger.summary()}
 
 
 def main():
@@ -43,6 +51,13 @@ def main():
     ap.add_argument("--suite", choices=SUITES, required=True)
     ap.add_argument("--rollouts", required=True, help="thư mục chứa task_XX/ep_YYY.npz (vd outputs/rollouts/libero_spatial)")
     ap.add_argument("--tasks", type=int, nargs="*", help="chỉ phát lại các task id này (mặc định: tất cả có trong thư mục)")
+    ap.add_argument(
+        "--fresh-env-at",
+        type=int,
+        nargs="*",
+        default=[],
+        help="tạo lại env trước các episode này, khớp với lúc rollout gốc resume bằng process mới",
+    )
     ap.add_argument("--out", help="mặc định: <rollouts>/safety_replay.json")
     args = ap.parse_args()
 
@@ -60,15 +75,22 @@ def main():
         env = lu.make_env(task)
         for npz in sorted(task_dir.glob("ep_*.npz")):
             with np.load(npz) as d:
-                episode, saved_success, actions = int(d["episode"]), bool(d["success"]), d["pred_env"]
-            res = replay_episode(env, init_states[episode], actions)
+                episode, saved_success, actions, eef_state = int(d["episode"]), bool(d["success"]), d["pred_env"], d["eef_state"]
+            if episode in args.fresh_env_at:
+                env.close()
+                env = lu.make_env(task)
+            res = replay_episode(env, init_states[episode], actions, eef_state)
             res.update(
                 task_id=task_id,
                 episode=episode,
                 instruction=task.language,
                 saved_success=saved_success,
                 saved_steps=int(len(actions)),
-                replay_matches=bool(res["replay_success"] == saved_success and res["replay_steps"] == len(actions)),
+                replay_matches=bool(
+                    res["replay_success"] == saved_success
+                    and res["replay_steps"] == len(actions)
+                    and res["max_eef_error"] < EEF_MATCH_TOLERANCE
+                ),
             )
             results.append(res)
         env.close()
@@ -86,6 +108,7 @@ def print_report(results: list[dict]) -> None:
         return
     print(f"\n=== {n} episode ===")
     print(f"phát lại khớp rollout gốc: {sum(r['replay_matches'] for r in results)}/{n}")
+    print(f"lệch end-effector lớn nhất: {max(r['max_eef_error'] for r in results) * 100:.3f} cm")
     for name, group in (("thành công", [r for r in results if r["saved_success"]]), ("thất bại", [r for r in results if not r["saved_success"]])):
         if not group:
             continue
