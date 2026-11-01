@@ -53,14 +53,20 @@ class SafetyLogger:
         data = self.sim.data
         force6 = np.zeros(6)
         out: dict[tuple[str, str], float] = {}
+        self._world_hits: dict[str, float] = {}  # robot chạm body không thuộc vật/fixture nào: tên body/geom -> lực lớn nhất
         for i, c in enumerate(data.contact[: data.ncon]):
             a = self._entity(int(self.model.geom_bodyid[c.geom1]))
             b = self._entity(int(self.model.geom_bodyid[c.geom2]))
             if a == b:
                 continue
             mujoco.mj_contactForce(self.model._model, data._data, i, force6)
+            force = abs(float(force6[0]))
             key = tuple(sorted((a, b)))
-            out[key] = max(out.get(key, 0.0), abs(float(force6[0])))
+            out[key] = max(out.get(key, 0.0), force)
+            if ROBOT in key and WORLD in key:
+                geom = c.geom1 if a == WORLD else c.geom2
+                name = f"{self.model.body_id2name(int(self.model.geom_bodyid[geom]))}/{self.model.geom_id2name(geom)}"
+                self._world_hits[name] = max(self._world_hits.get(name, 0.0), force)
         return out
 
     def _position(self, name: str) -> np.ndarray:
@@ -82,6 +88,7 @@ class SafetyLogger:
                 if x in self.targets and y not in self.targets and y not in (ROBOT, TABLE, WORLD):
                     self.supports.add(y)
         self.max_disp = {n: 0.0 for n in self._body_id}
+        self.world_geoms: dict[str, dict] = {}  # robot chạm gì trong "world": tên -> {steps, peak_force}
         self.pair_steps: dict[tuple[str, str], int] = {}
         self.pair_peak: dict[tuple[str, str], float] = {}
         self.unintended_contact: list[bool] = []  # mỗi bước: robot đang chạm vật ngoài mục tiêu và ngoài vật đỡ
@@ -98,6 +105,10 @@ class SafetyLogger:
             if ROBOT in k:
                 self.pair_steps[k] = self.pair_steps.get(k, 0) + 1
                 self.pair_peak[k] = max(self.pair_peak.get(k, 0.0), f)
+        for name, f in self._world_hits.items():
+            w = self.world_geoms.setdefault(name, {"steps": 0, "peak_force": 0.0})
+            w["steps"] += 1
+            w["peak_force"] = max(w["peak_force"], f)
         self.unintended_contact.append(bool(unintended))
         self.unintended_force.append(max(unintended.values()) if unintended else 0.0)
         for n in self._body_id:
@@ -117,6 +128,7 @@ class SafetyLogger:
         return {
             "supports": sorted(self.supports),
             "robot_contacts": robot_pairs,  # mọi vật robot từng chạm (kể cả mục tiêu, vật đỡ, bàn)
+            "world_contacts": self.world_geoms,
             "unintended_steps": int(sum(self.unintended_contact)),
             "unintended_peak_force": float(max(self.unintended_force, default=0.0)),
             "max_displacement": self.max_disp,

@@ -97,6 +97,17 @@ def print_report(results: list[dict]) -> None:
             f"robot chạm vật ngoài ý muốn = {touched}"
             + (f", lực đỉnh trung vị = {np.median(forces):.1f} N, lớn nhất = {max(forces):.1f} N" if forces else "")
         )
+    world: dict[str, list] = {}
+    for r in results:
+        for name, w in r["world_contacts"].items():
+            agg = world.setdefault(name, [0, 0, 0.0])
+            agg[0] += 1
+            agg[1] += w["steps"]
+            agg[2] = max(agg[2], w["peak_force"])
+    if world:
+        print("\nRobot chạm vào \"world\" (body không thuộc vật/fixture nào), theo body/geom:")
+        for name, (eps, steps, peak) in sorted(world.items(), key=lambda kv: -kv[1][2]):
+            print(f"  {name:50} {eps:3d} episode, {steps:5d} bước, lực đỉnh {peak:.1f} N")
     print("\nVật ngoài mục tiêu bị đẩy nhiều nhất:")
     for r in sorted(results, key=lambda r: -max(r["moved_nontarget"].values(), default=0.0))[:5]:
         if r["moved_nontarget"]:
