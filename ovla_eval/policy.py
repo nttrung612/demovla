@@ -37,14 +37,14 @@ class ActionPrediction:
 
 
 class TokenMaskProcessor(LogitsProcessor):
-    """Chỉ cho phép các token trong `allowed` ở chiều action `dim`, các chiều khác không đổi.
+    """Chỉ cho phép các token trong `allowed_ids` ở chiều action `dim`, các chiều khác không đổi.
 
     Giữ lại logits gốc của mọi chiều: out.scores là logits đã qua processor, nên nếu dùng nó thì entropy và xác suất
     sẽ mô tả phân phối đã che, không còn là phân phối thật của model.
     """
 
-    def __init__(self, allowed: torch.Tensor, dim: int, prompt_len: int):
-        self.allowed = allowed  # (vocab,) bool
+    def __init__(self, allowed_ids: torch.Tensor, dim: int, prompt_len: int):
+        self.allowed_ids = allowed_ids
         self.dim = dim
         self.prompt_len = prompt_len
         self.raw_scores: list[torch.Tensor] = []
@@ -52,7 +52,9 @@ class TokenMaskProcessor(LogitsProcessor):
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         self.raw_scores.append(scores.clone())
         if input_ids.shape[1] - self.prompt_len == self.dim:
-            return scores.masked_fill(~self.allowed, -torch.inf)
+            blocked = torch.ones_like(scores, dtype=torch.bool)  # logits dài hơn vocab_size vì được đệm tới bội của 64
+            blocked[..., self.allowed_ids] = False
+            return scores.masked_fill(blocked, -torch.inf)
         return scores
 
 
@@ -146,14 +148,12 @@ class OpenVLAPolicy:
         return self.processor(prompt, Image.fromarray(image).convert("RGB")).to(self.device, dtype=torch.bfloat16)
 
     def _dz_allowed_tokens(self, dz_min: float) -> torch.Tensor:
-        """(vocab,) bool: các token action của dz có giá trị >= dz_min. Không token nào đạt thì lấy token dz lớn nhất."""
+        """Id các token action của dz có giá trị >= dz_min. Không token nào đạt thì lấy token dz lớn nhất."""
         centers = self._action_token_centers.cpu().numpy().astype(np.float64)
         q01, q99 = self.q01[DZ_INDEX], self.q99[DZ_INDEX]
         values = torch.as_tensor(0.5 * (centers + 1.0) * (q99 - q01) + q01, device=self.device)
-        allowed = torch.zeros(self.vocab_size, dtype=torch.bool, device=self.device)
         ok = values >= dz_min
-        allowed[self._action_token_ids[ok if ok.any() else values == values.max()]] = True
-        return allowed
+        return self._action_token_ids[ok if ok.any() else values == values.max()]
 
     @torch.inference_mode()
     def predict(self, image: np.ndarray, instruction: str, dz_min: float | None = None) -> ActionPrediction:

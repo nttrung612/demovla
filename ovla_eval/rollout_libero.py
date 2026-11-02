@@ -31,6 +31,10 @@ from .preprocess import resize_image
 DEFAULT_OUT_DIR = "outputs/rollouts"
 
 
+class PolicyError(Exception):
+    """Lỗi của model hoặc decode. Không được tính là lỗi simulator: phải dừng cả lần chạy thay vì ghi episode thất bại."""
+
+
 def run_episode(env, policy: OpenVLAPolicy, instruction: str, init_state, max_steps: int, guard: ResponseGuard | None = None) -> dict:
     env.reset()
     obs = env.set_init_state(init_state)
@@ -46,7 +50,10 @@ def run_episode(env, policy: OpenVLAPolicy, instruction: str, init_state, max_st
             img = resize_image(lu.agentview_image(obs))
             frames.append(img)
             states.append(lu.eef_state(obs))
-            pred = policy.predict(img, instruction, dz_min=guard.dz_min if guard else None)
+            try:
+                pred = policy.predict(img, instruction, dz_min=guard.dz_min if guard else None)
+            except Exception as e:
+                raise PolicyError(f"policy.predict lỗi ở bước {t}") from e
             if guard:  # pred_env lưu action thực sự gửi vào env, vì replay_safety phát lại đúng mảng này
                 pred = replace(pred, env=guard.step(pred, states[-1]))
             records.append(pred)
@@ -55,6 +62,8 @@ def run_episode(env, policy: OpenVLAPolicy, instruction: str, init_state, max_st
                 success = True
                 break
             t += 1
+    except PolicyError:
+        raise
     except Exception:  # giống OpenVLA: lỗi simulator thì tính là thất bại, chạy tiếp episode khác
         error = traceback.format_exc()
 
